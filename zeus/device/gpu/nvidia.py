@@ -13,6 +13,7 @@ from functools import lru_cache
 import pynvml
 
 import zeus.device.gpu.common as gpu_common
+from zeus.device.gpu.common import optional_query_gpu_info
 from zeus.exception import ZeusBaseError
 from zeus.utils.zeusd import ZeusdClient, ZeusdConfig, require_capabilities
 
@@ -447,3 +448,88 @@ class NVIDIAGPUs(gpu_common.GPUs):
         """Shut down NVML."""
         with contextlib.suppress(pynvml.NVMLError):
             pynvml.nvmlShutdown()
+
+
+def inspect_gpu(
+    gpu: NVIDIAGPU,
+) -> gpu_common.GPUHardwareInfo:
+    """Collect normalized characteristics from one NVIDIA GPU."""
+
+    def decode_nvml_string(value: object) -> str:
+        return value.decode() if isinstance(value, bytes) else str(value)
+
+    software_versions = {
+        "driver": decode_nvml_string(pynvml.nvmlSystemGetDriverVersion()),
+        "nvml": decode_nvml_string(pynvml.nvmlSystemGetNVMLVersion()),
+    }
+
+    pci_bus_id = optional_query_gpu_info(lambda: pynvml.nvmlDeviceGetPciInfo(gpu.handle).busId)
+    pci_address = None if pci_bus_id is None else decode_nvml_string(pci_bus_id)
+    architecture_value = optional_query_gpu_info(lambda: pynvml.nvmlDeviceGetArchitecture(gpu.handle))
+    architecture = (
+        None
+        if architecture_value is None
+        else next(
+            (
+                name.removeprefix("NVML_DEVICE_ARCH_").lower()
+                for name, value in vars(pynvml).items()
+                if name.startswith("NVML_DEVICE_ARCH_") and value == architecture_value
+            ),
+            str(architecture_value),
+        )
+    )
+    compute_capability = optional_query_gpu_info(lambda: pynvml.nvmlDeviceGetCudaComputeCapability(gpu.handle))
+    memory_info = optional_query_gpu_info(lambda: pynvml.nvmlDeviceGetMemoryInfo(gpu.handle))
+    total_memory_mb = None if memory_info is None else int(memory_info.total // 1024**2)
+    persistence_mode = optional_query_gpu_info(gpu.get_persistence_mode)
+    current_temperature = optional_query_gpu_info(gpu.get_gpu_temperature)
+    current_power_mw = optional_query_gpu_info(gpu.get_instant_power_usage)
+    current_power_w = None if current_power_mw is None else current_power_mw / 1000
+    current_power_limit_mw = optional_query_gpu_info(gpu.get_power_management_limit)
+    current_power_limit_w = None if current_power_limit_mw is None else current_power_limit_mw / 1000
+    default_power_limit_mw = optional_query_gpu_info(
+        lambda: pynvml.nvmlDeviceGetPowerManagementDefaultLimit(gpu.handle)
+    )
+    default_power_limit_w = None if default_power_limit_mw is None else default_power_limit_mw / 1000
+    power_range_mw = optional_query_gpu_info(gpu.get_power_management_limit_constraints)
+    power_range_w = None if power_range_mw is None else (power_range_mw[0] / 1000, power_range_mw[1] / 1000)
+    current_memory_clock = optional_query_gpu_info(
+        lambda: pynvml.nvmlDeviceGetClockInfo(gpu.handle, pynvml.NVML_CLOCK_MEM),
+    )
+    memory_clocks = optional_query_gpu_info(gpu.get_supported_memory_clocks) or []
+    current_graphics_clock = optional_query_gpu_info(
+        lambda: pynvml.nvmlDeviceGetClockInfo(gpu.handle, pynvml.NVML_CLOCK_GRAPHICS),
+    )
+    graphics_clocks_by_memory_clock: dict[int, tuple[int, ...]] = {}
+    for memory_clock in memory_clocks:
+        clocks = optional_query_gpu_info(
+            lambda memory_clock=memory_clock: gpu.get_supported_graphics_clocks(memory_clock),
+        )
+        if clocks is not None:
+            graphics_clocks_by_memory_clock[memory_clock] = tuple(sorted(set(clocks)))
+    memory_clock_values = tuple(sorted(set(memory_clocks)))
+    graphics_clock_values = tuple(
+        sorted({clock for clocks in graphics_clocks_by_memory_clock.values() for clock in clocks})
+    )
+
+    return gpu_common.GPUHardwareInfo(
+        gpu_index=gpu.gpu_index,
+        vendor="nvidia",
+        software_versions=software_versions,
+        model_name=gpu.get_name(),
+        pci_address=pci_address,
+        architecture=architecture,
+        compute_capability=compute_capability,
+        total_memory_mb=total_memory_mb,
+        persistence_mode=persistence_mode,
+        current_temperature_c=current_temperature,
+        current_power_w=current_power_w,
+        current_power_limit_w=current_power_limit_w,
+        default_power_limit_w=default_power_limit_w,
+        power_limit_range_w=power_range_w,
+        current_memory_clock_mhz=current_memory_clock,
+        supported_memory_clocks_mhz=memory_clock_values,
+        current_graphics_clock_mhz=current_graphics_clock,
+        supported_graphics_clocks_mhz=graphics_clock_values,
+        supported_graphics_clocks_by_memory_clock_mhz=graphics_clocks_by_memory_clock,
+    )

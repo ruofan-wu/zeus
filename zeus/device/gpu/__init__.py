@@ -1,7 +1,9 @@
 """Abstraction layer for GPU devices.
 
-The main function of this module is [`get_gpus`][zeus.device.gpu.get_gpus],
-which returns a GPU Manager object specific to the platform.
+The main functions in this module are [`get_gpus`][zeus.device.gpu.get_gpus],
+which returns a GPU Manager object specific to the platform, and
+[`inspect_gpu`][zeus.device.gpu.inspect_gpu], which returns normalized
+hardware information.
 
 !!! Important
     In theory, any NVIDIA GPU would be supported.
@@ -17,6 +19,19 @@ depending on the platform.
 from zeus.device import get_gpus
 gpus = get_gpus()
 ```
+
+## Inspect GPU hardware information
+
+[`inspect_gpu`][zeus.device.gpu.inspect_gpu] returns normalized hardware
+information for one GPU.
+
+```python
+from zeus.device.gpu import inspect_gpu
+gpu_info = inspect_gpu(gpu_index=0)
+print(gpu_info)
+```
+
+`inspect_gpu` only queries GPU state in read-only mode.
 
 ## Calling GPU management APIs
 
@@ -79,7 +94,12 @@ The following exceptions are defined in this module:
 from __future__ import annotations
 
 from zeus.device.gpu.common import *
-from zeus.device.gpu.common import GPUs, ZeusGPUInitError
+from zeus.device.gpu.common import (
+    GPUs,
+    GPUHardwareInfo,
+    ZeusGPUInitError,
+    ZeusGPUNotSupportedError,
+)
 from zeus.device.gpu.nvidia import nvml_is_available, NVIDIAGPUs
 from zeus.device.gpu.amd import amdsmi_is_available, AMDGPUs
 
@@ -116,3 +136,30 @@ def get_gpus(ensure_homogeneous: bool = False) -> GPUs:
         return _gpus
     else:
         raise ZeusGPUInitError("NVML and AMDSMI unavailable. Failed to initialize GPU management library.")
+
+
+def inspect_gpu(
+    gpu_index: int = 0,
+) -> GPUHardwareInfo:
+    """Inspect one NVIDIA or AMD GPU.
+
+    This function only uses vendor management APIs and does not create CUDA or
+    HIP contexts. Unsupported optional properties are returned as None instead
+    of failing the entire inspection.
+
+    Args:
+        gpu_index: Logical index of the GPU to inspect. Defaults to 0.
+    """
+    gpus = get_gpus()
+    if gpu_index < 0 or gpu_index >= len(gpus):
+        raise ValueError(f"GPU index must be between 0 and {len(gpus) - 1}: {gpu_index}")
+
+    if isinstance(gpus, NVIDIAGPUs):
+        from zeus.device.gpu.nvidia import inspect_gpu as inspect_nvidia_gpu
+
+        return inspect_nvidia_gpu(gpus.gpus[gpu_index])
+    if isinstance(gpus, AMDGPUs):
+        from zeus.device.gpu.amd import inspect_gpu as inspect_amd_gpu
+
+        return inspect_amd_gpu(gpus.gpus[gpu_index])
+    raise ZeusGPUNotSupportedError(f"GPU characterization is not implemented for {type(gpus).__name__}.")

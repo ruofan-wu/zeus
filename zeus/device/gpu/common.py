@@ -5,12 +5,15 @@ from __future__ import annotations
 import abc
 import logging
 import warnings
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Callable, Sequence, TypeVar
 
 from zeus.device.exception import ZeusBaseGPUError
 from zeus.device.common import has_sys_admin, deprecated_alias, DeprecatedAliasABCMeta
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 class GPU(abc.ABC, metaclass=DeprecatedAliasABCMeta):
@@ -645,3 +648,36 @@ class ZeusGPUHeterogeneousError(ZeusBaseGPUError):
     def __init__(self, message: str) -> None:
         """Intialize the exception object."""
         super().__init__(message)
+
+
+@dataclass(frozen=True)
+class GPUHardwareInfo:
+    """Normalized hardware and runtime information for one GPU."""
+
+    gpu_index: int
+    vendor: str
+    software_versions: dict[str, str]
+    model_name: str
+    pci_address: str | None
+    architecture: str | None
+    compute_capability: tuple[int, int] | None
+    total_memory_mb: int | None
+    persistence_mode: bool | None
+    current_temperature_c: int | None
+    current_power_w: float | None
+    current_power_limit_w: float | None
+    default_power_limit_w: float | None
+    power_limit_range_w: tuple[float, float] | None
+    current_memory_clock_mhz: int | None
+    supported_memory_clocks_mhz: tuple[int, ...]
+    current_graphics_clock_mhz: int | None
+    supported_graphics_clocks_mhz: tuple[int, ...]
+    supported_graphics_clocks_by_memory_clock_mhz: dict[int, tuple[int, ...]] | None
+
+
+def optional_query_gpu_info(query: Callable[[], T]) -> T | None:
+    """Return None when an optional inspection query fails."""
+    try:
+        return query()
+    except Exception:
+        return None

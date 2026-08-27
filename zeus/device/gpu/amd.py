@@ -8,7 +8,7 @@ import contextlib
 import logging
 import time
 from ctypes import c_void_p
-from typing import Sequence
+from typing import Any, Sequence
 from functools import lru_cache
 
 try:
@@ -33,6 +33,7 @@ except Exception:
     amdsmi = MockAMDSMI()  # ty: ignore[invalid-assignment]
 
 import zeus.device.gpu.common as gpu_common
+from zeus.device.gpu.common import optional_query_gpu_info
 from zeus.exception import ZeusBaseError
 from zeus.utils.zeusd import ZeusdClient, ZeusdConfig, require_capabilities
 
@@ -709,3 +710,73 @@ class AMDGPUs(gpu_common.GPUs):
         """Shut down AMDSMI."""
         with contextlib.suppress(amdsmi.AmdSmiException):
             amdsmi.amdsmi_shut_down()  # Ignore error on shutdown. Neccessary for proper cleanup and test functionality
+
+
+def inspect_gpu(
+    gpu: AMDGPU,
+) -> gpu_common.GPUHardwareInfo:
+    """Collect normalized characteristics from one AMD GPU."""
+
+    def format_amdsmi_version(version: dict[str, Any]) -> str:
+        base = ".".join(str(version[key]) for key in ("major", "minor", "release"))
+        build = version.get("build")
+        return f"{base}+{build}" if build else base
+
+    software_versions = {
+        "amdsmi": format_amdsmi_version(amdsmi.amdsmi_get_lib_version()),
+        "driver_version": str(amdsmi.amdsmi_get_gpu_driver_info(gpu.handle)["driver_version"]),
+    }
+
+    asic_info = optional_query_gpu_info(lambda: amdsmi.amdsmi_get_gpu_asic_info(gpu.handle))
+    pci_address = optional_query_gpu_info(lambda: amdsmi.amdsmi_get_gpu_device_bdf(gpu.handle))
+    vram_info = optional_query_gpu_info(lambda: amdsmi.amdsmi_get_gpu_vram_info(gpu.handle))
+    total_memory_mb = None if vram_info is None else int(vram_info["vram_size"])
+    persistence_mode = optional_query_gpu_info(gpu.get_persistence_mode)
+    current_temperature = optional_query_gpu_info(gpu.get_gpu_temperature)
+    current_power_mw = optional_query_gpu_info(gpu.get_instant_power_usage)
+    current_power_w = None if current_power_mw is None else current_power_mw / 1000
+    current_power_limit_mw = optional_query_gpu_info(gpu.get_power_management_limit)
+    current_power_limit_w = None if current_power_limit_mw is None else current_power_limit_mw / 1000
+    power_info = optional_query_gpu_info(lambda: amdsmi.amdsmi_get_power_cap_info(gpu.handle))
+    default_power_limit_w = None if power_info is None else power_info["default_power_cap"] / 1_000_000
+    power_range_mw = optional_query_gpu_info(gpu.get_power_management_limit_constraints)
+    power_range_w = None if power_range_mw is None else (power_range_mw[0] / 1000, power_range_mw[1] / 1000)
+    memory_clock_info = optional_query_gpu_info(
+        lambda: amdsmi.amdsmi_get_clock_info(gpu.handle, amdsmi.AmdSmiClkType.MEM),
+    )
+    current_memory_clock = None if memory_clock_info is None else int(memory_clock_info["clk"])
+    graphics_clock_info = optional_query_gpu_info(
+        lambda: amdsmi.amdsmi_get_clock_info(gpu.handle, amdsmi.AmdSmiClkType.GFX),
+    )
+    current_graphics_clock = None if graphics_clock_info is None else int(graphics_clock_info["clk"])
+
+    def get_supported_clocks_mhz(clock_type: Any) -> tuple[int, ...]:
+        clock_info = amdsmi.amdsmi_get_clk_freq(gpu.handle, clock_type)
+        return tuple(sorted({round(int(clock_hz) / 1_000_000) for clock_hz in clock_info["frequency"]}))
+
+    memory_clock_values = optional_query_gpu_info(lambda: get_supported_clocks_mhz(amdsmi.AmdSmiClkType.MEM)) or ()
+    graphics_clock_values = optional_query_gpu_info(lambda: get_supported_clocks_mhz(amdsmi.AmdSmiClkType.GFX)) or ()
+    architecture_value = None if asic_info is None else asic_info.get("target_graphics_version")
+    architecture = None if architecture_value in (None, "", "N/A") else str(architecture_value)
+
+    return gpu_common.GPUHardwareInfo(
+        gpu_index=gpu.gpu_index,
+        vendor="amd",
+        software_versions=software_versions,
+        model_name=gpu.get_name(),
+        pci_address=pci_address,
+        architecture=architecture,
+        compute_capability=None,
+        total_memory_mb=total_memory_mb,
+        persistence_mode=persistence_mode,
+        current_temperature_c=current_temperature,
+        current_power_w=current_power_w,
+        current_power_limit_w=current_power_limit_w,
+        default_power_limit_w=default_power_limit_w,
+        power_limit_range_w=power_range_w,
+        current_memory_clock_mhz=current_memory_clock,
+        supported_memory_clocks_mhz=memory_clock_values,
+        current_graphics_clock_mhz=current_graphics_clock,
+        supported_graphics_clocks_mhz=graphics_clock_values,
+        supported_graphics_clocks_by_memory_clock_mhz=None,
+    )
